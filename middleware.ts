@@ -36,6 +36,21 @@ const PROTECTED = ['/chat', '/history', '/settings', '/docs']
 const ADMIN_R   = ['/admin/dashboard']
 const AUTH_R    = ['/login', '/register']
 
+async function verifyAdminCookie(req: NextRequest): Promise<boolean> {
+  try {
+    const token = req.cookies.get('admin_session')?.value
+    if (!token) return false
+    const url   = process.env.UPSTASH_REDIS_REST_URL
+    const tkn   = process.env.UPSTASH_REDIS_REST_TOKEN
+    if (!url || !tkn) return false
+    const r = await fetch(`${url}/get/admin:session:${token}`, {
+      headers: { Authorization: `Bearer ${tkn}` },
+    })
+    const j = await r.json()
+    return !!j.result
+  } catch { return false }
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
   const ip  = (req.headers.get('x-forwarded-for') ?? '127.0.0.1').split(',')[0].trim()
@@ -67,7 +82,10 @@ export async function middleware(req: NextRequest) {
     const url = new URL('/login', req.url); url.searchParams.set('redirect', pathname); return NextResponse.redirect(url)
   }
   if (AUTH_R.some(r => pathname.startsWith(r)) && user) return NextResponse.redirect(new URL('/chat', req.url))
-  if (ADMIN_R.some(r => pathname.startsWith(r)) && !user) return NextResponse.redirect(new URL('/admin', req.url))
+  if (ADMIN_R.some(r => pathname.startsWith(r))) {
+    const validAdmin = await verifyAdminCookie(req)
+    if (!validAdmin) return NextResponse.redirect(new URL('/admin', req.url))
+  }
 
   response.headers.set('x-client-ip',     ip)
   response.headers.set('x-anomaly-score',  String(w.score))
