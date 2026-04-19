@@ -44,12 +44,12 @@ export function MdContent({ raw, toolsMode = false }: { raw: string; toolsMode?:
         const langLabel = safeLang ? `<span class="code-lang">${safeLang}</span>` : ''
         const copyBtn  = `<button class="code-copy-btn" data-code="${encodeURIComponent(safeText)}">COPY</button>`
         const saveBtn  = toolsMode ? `<button class="code-dl-btn" data-lang="${safeLang||'txt'}" data-code="${encodeURIComponent(safeText)}">SAVE</button>` : ''
-        return `<div class="code-block-wrap">${langLabel}${copyBtn}${saveBtn}<pre><code class="language-${safeLang}">${escaped}</code></pre></div>`
+        return `<div class="code-block-wrap">${langLabel}<div class="code-btn-group">${copyBtn}${saveBtn}</div><pre><code class="language-${safeLang}">${escaped}</code></pre></div>`
       }
       const dirty = marked.parse(raw, { renderer }) as string
       const clean = (DOMPurify as unknown as { sanitize: (html: string, opts: object) => string }).sanitize(dirty, {
-        ALLOWED_TAGS: ['p','br','strong','em','b','i','s','del','u','h1','h2','h3','h4','h5','h6','ul','ol','li','blockquote','hr','table','thead','tbody','tr','th','td','pre','code','span','div','a'],
-        ALLOWED_ATTR: ['href','target','rel','class','data-lang','data-code'],
+        ALLOWED_TAGS: ['p','br','strong','em','b','i','s','del','u','h1','h2','h3','h4','h5','h6','ul','ol','li','blockquote','hr','table','thead','tbody','tr','th','td','pre','code','span','div','a','button'],
+        ALLOWED_ATTR: ['href','target','rel','class','data-lang','data-code','type'],
         FORCE_BODY: true,
       })
       setHtml(clean)
