@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     await redis.setex(`admin:session:${sessionToken}`, 3600, ip)
 
     const res = NextResponse.json({ success: true })
-    res.cookies.set('admin_session', sessionToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', maxAge: 3600, path: '/admin' })
+    res.cookies.set('admin_session', sessionToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', maxAge: 3600, path: '/' })
     return res
   } catch (err) {
     console.error('[admin/tfa]', err)

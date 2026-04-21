@@ -26,7 +26,7 @@ export async function streamAria(opts: AriaStreamOptions): Promise<AriaResult> {
     apiKey,
     temperature = 0.7,
     topP        = 0.95,
-    maxTokens   = 8192,
+    maxTokens   = 4096,
     onToken,
   } = opts
 
@@ -73,7 +73,9 @@ export async function streamAria(opts: AriaStreamOptions): Promise<AriaResult> {
       if (t.startsWith('data: ')) {
         try {
           const j = JSON.parse(t.slice(6))
-          const delta = j.choices?.[0]?.delta?.content ?? ''
+          const delta = j.choices?.[0]?.delta?.content
+                    ?? j.choices?.[0]?.delta?.reasoning_content
+                    ?? ''
           if (delta) {
             full += delta
             onToken(delta)

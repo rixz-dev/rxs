@@ -13,13 +13,24 @@ export interface LoopOptions {
   systemPrompt?: string
   apiKey:        string
   maxIterations?: number
-  // SSE writer — caller provides this
   write: (chunk: AriaStreamChunk) => void
 }
 
 const ARIA_SYS_DEFAULT = `Kamu adalah Aria, AI assistant yang cerdas, cakap dalam coding, pembuatan file, dan tugas teknis.
 Berikan output yang lengkap dan akurat. Selalu gunakan fenced code block yang proper untuk semua kode.
 Jika ada feedback dari reviewer, perbaiki secara menyeluruh dan berikan output yang sudah diperbaiki secara lengkap.`
+
+// FIX: trim conversation, keep sys prompt + last N pairs to avoid context blowup
+function trimConversation(
+  conv: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+  keepPairs = 2
+): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
+  const sysMsg  = conv.filter(m => m.role === 'system')
+  const nonSys  = conv.filter(m => m.role !== 'system')
+  // 1 pair = 1 assistant + 1 user (feedback), +1 buat initial user msg
+  const trimmed = nonSys.slice(-(keepPairs * 2 + 1))
+  return [...sysMsg, ...trimmed]
+}
 
 export async function runAgentLoop(opts: LoopOptions): Promise<void> {
   const {
@@ -32,7 +43,6 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
 
   write({ type: 'iteration_start', iteration: 0 })
 
-  // Build Aria conversation — start fresh
   let ariaConversation: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [
     { role: 'system', content: systemPrompt },
     ...userMessages,
@@ -47,20 +57,22 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
     isComplete:    false,
   }
 
-  // Get user's task from last user message
   const userTask = [...userMessages].reverse().find(m => m.role === 'user')?.content ?? ''
 
   for (let iter = 1; iter <= maxIterations; iter++) {
-    state.iteration  = iter
-    state.ariaOutput = ''
+    state.iteration   = iter
+    state.ariaOutput  = ''
     state.nexusOutput = ''
 
     write({ type: 'iteration_start', iteration: iter })
 
+    // FIX: trim sebelum kirim ke Aria — cegah context blowup
+    const trimmedConv = trimConversation(ariaConversation)
+
     // ── ARIA ───────────────────────────────────────────────────
     try {
       const ariaResult = await streamAria({
-        messages:  ariaConversation,
+        messages: trimmedConv,
         apiKey,
         onToken: (token) => {
           state.ariaOutput += token
@@ -69,11 +81,17 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
       })
 
       state.ariaOutput = ariaResult.content
-      write({ type: 'aria_token', content: '', iteration: iter }) // signal done
+      write({ type: 'aria_token', content: '', iteration: iter })
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       write({ type: 'error', error: `Aria error iter ${iter}: ${msg}` })
+      return
+    }
+
+    // FIX: guard empty output — jangan terusin ke Nexus kalau Aria kosong
+    if (!state.ariaOutput.trim()) {
+      write({ type: 'error', error: `Aria returned empty output on iter ${iter}. Possible model field mismatch.` })
       return
     }
 
@@ -87,8 +105,7 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
         iteration:  iter,
         apiKey,
         onToken: (token) => {
-          state.nexusOutput   += token
-          state.nexusThinking += '' // parsed later
+          state.nexusOutput += token
           write({ type: 'nexus_thinking', content: token, iteration: iter })
         },
       })
@@ -103,8 +120,8 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
     state.nexusThinking = nexusVerdict.thinking
 
     write({
-      type:     'nexus_token',
-      content:  JSON.stringify({
+      type:      'nexus_token',
+      content:   JSON.stringify({
         thinking: nexusVerdict.thinking,
         output:   nexusVerdict.cleanOutput,
         verdict:  nexusVerdict.verdict,
@@ -121,9 +138,9 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
       return
     }
 
-    // verdict === 'fix' → add feedback to Aria conversation and continue
+    // FIX: spread ke trimmedConv, bukan full ariaConversation
     ariaConversation = [
-      ...ariaConversation,
+      ...trimmedConv,
       { role: 'assistant', content: state.ariaOutput },
       {
         role: 'user',
@@ -131,7 +148,6 @@ export async function runAgentLoop(opts: LoopOptions): Promise<void> {
       },
     ]
 
-    // Last iteration — output regardless
     if (iter === maxIterations) {
       state.isComplete = true
       write({ type: 'done' })
