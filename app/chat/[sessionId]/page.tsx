@@ -37,6 +37,9 @@ const IC = {
   Token:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>,
   Copy:    () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>,
   Trash:   () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>,
+  Edit:    () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+  Refresh: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>,
+  Zap:     () => <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
   File:    () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>,
   ExtLink: () => <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>,
 }
@@ -291,6 +294,8 @@ export default function ChatSessionPage() {
   const [streaming,   setStreaming]   = useState('')
   const [agentIters,  setAgentIters]  = useState<AgentIteration[]>([])
   const [agentMode,   setAgentMode]   = useState(false)
+  const [chatMode,    setChatMode]    = useState<'professional' | 'fast'>('professional')
+  const [editingId,   setEditingId]   = useState<string | null>(null)
   const [files,       setFiles]       = useState<{ name: string; content: string }[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [panel,       setPanel]       = useState<Panel>('menu')
@@ -398,33 +403,29 @@ export default function ChatSessionPage() {
     }
   }, [sessionId])
 
-  const send = useCallback(async () => {
-    const text = input.trim()
-    if (!text || loading) return
+  // ─── Core stream function — reusable by send + regenrate ──────
+  const fireStream = useCallback(async (
+    userText:     string,
+    historyMsgs:  ChatMessage[],
+    addUserBubble = true,
+  ) => {
+    if (loading) return
+    setLoading(true); setStreaming(''); setAgentIters([])
 
-    // FIX #6: Intercept /file command
-    const fileCmd = parseFileCmd(text)
-    if (fileCmd) { handleFileCmd(fileCmd); return }
-
-    let userContent = text
-    for (const f of files) userContent += `\n\n<file name="${f.name}">\n${f.content}\n</file>`
-
-    const userMsg: ChatMessage = { id: `u_${Date.now()}`, role: 'user', content: text }
-    setMessages(prev => [...prev, userMsg])
-    setInput(''); setFiles([]); setLoading(true); setStreaming(''); setAgentIters([])
+    const userMsg: ChatMessage = { id: `u_${Date.now()}`, role: 'user', content: userText }
+    if (addUserBubble) setMessages(prev => [...prev, userMsg])
 
     const controller = new AbortController()
     abortRef.current = controller
 
     const apiMessages = [
-      ...messages.filter(m => m.role === 'user' || m.role === 'aria').map(m => ({
+      ...historyMsgs.filter(m => m.role === 'user' || m.role === 'aria').map(m => ({
         role: m.role === 'aria' ? 'assistant' as const : 'user' as const,
         content: m.content,
       })),
-      { role: 'user' as const, content: userContent },
+      { role: 'user' as const, content: userText },
     ]
 
-    // FIX #3: Hoist keluar dari try agar finally bisa akses
     let directContent = ''
     let liveIters:     AgentIteration[] = []
     let doneReceived   = false
@@ -434,7 +435,12 @@ export default function ChatSessionPage() {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         signal:  controller.signal,
-        body:    JSON.stringify({ messages: apiMessages, sessionId, mode: agentMode ? 'agent' : 'direct' }),
+        body:    JSON.stringify({
+          messages:      apiMessages,
+          sessionId,
+          mode:          agentMode ? 'agent' : 'direct',
+          maxIterations: chatMode === 'fast' ? 1 : 5,
+        }),
       })
       if (!res.ok) throw new Error(`${res.status} — ${(await res.text()).slice(0, 200)}`)
 
@@ -454,7 +460,6 @@ export default function ChatSessionPage() {
           let evt: { type: string; content?: string; iteration?: number }
           try { evt = JSON.parse(line.slice(6)) } catch { continue }
 
-          // ── Direct mode ──────────────────────────────────
           if (!agentMode) {
             if (evt.type === 'aria_token') { directContent += evt.content ?? ''; setStreaming(directContent) }
             if (evt.type === 'done') {
@@ -465,7 +470,6 @@ export default function ChatSessionPage() {
             continue
           }
 
-          // ── Agent mode ───────────────────────────────────
           if (evt.type === 'iteration_start' && (evt.iteration ?? 0) > 0) {
             currentIter = { iteration: evt.iteration!, ariaContent: '', ariaStreaming: true, nexusContent: '', nexusThinking: '', nexusStreaming: false, verdict: null, notes: '' }
             liveIters = [...liveIters.filter(i => i.iteration !== evt.iteration), currentIter]
@@ -475,7 +479,6 @@ export default function ChatSessionPage() {
             currentIter = { ...currentIter, ariaContent: currentIter.ariaContent + (evt.content ?? '') }
             liveIters = updateIter(liveIters, currentIter); setAgentIters([...liveIters])
           }
-          // FIX #8: Handle nexus_thinking (live streaming dari Nexus, dulu di-ignore)
           if (evt.type === 'nexus_thinking' && currentIter) {
             currentIter = { ...currentIter, nexusContent: currentIter.nexusContent + (evt.content ?? ''), nexusStreaming: true }
             liveIters = updateIter(liveIters, currentIter); setAgentIters([...liveIters])
@@ -500,7 +503,6 @@ export default function ChatSessionPage() {
       }
     } catch (err: unknown) {
       if ((err as Error).name === 'AbortError') {
-        // User stop — simpan konten yang sudah ada
         if (directContent && !agentMode) {
           setMessages(prev => [...prev, { id: `a_${Date.now()}`, role: 'aria', content: directContent + '\n\n*(dihentikan)*' }])
         }
@@ -509,7 +511,6 @@ export default function ChatSessionPage() {
       }
       setMessages(prev => [...prev, { id: `err_${Date.now()}`, role: 'error', content: err instanceof Error ? err.message : String(err) }])
     } finally {
-      // FIX #3: Stream drop sebelum 'done' → commit content yang ada, jangan buang
       if (!doneReceived) {
         if (directContent && !agentMode) {
           setMessages(prev => [...prev, { id: `a_${Date.now()}`, role: 'aria', content: directContent }])
@@ -519,11 +520,52 @@ export default function ChatSessionPage() {
           setMessages(prev => [...prev, { id: `ag_${Date.now()}`, role: 'agent', content: last?.ariaContent ?? '', agentIters: [...liveIters], iterations: liveIters.length }])
         }
       }
-      setLoading(false)
-      setStreaming('')
-      setAgentIters([])
+      setLoading(false); setStreaming(''); setAgentIters([])
     }
-  }, [input, files, messages, loading, agentMode, sessionId, handleFileCmd])
+  }, [loading, agentMode, chatMode, sessionId])
+
+  const send = useCallback(async () => {
+    const text = input.trim()
+    if (!text || loading) return
+
+    const fileCmd = parseFileCmd(text)
+    if (fileCmd) { handleFileCmd(fileCmd); return }
+
+    let userContent = text
+    for (const f of files) userContent += `\n\n<file name="${f.name}">\n${f.content}\n</file>`
+
+    if (editingId) {
+      // Edit mode — truncate history to before the edited message, re-fire
+      const editIdx = messages.findIndex(m => m.id === editingId)
+      const historyBeforeEdit = editIdx > 0 ? messages.slice(0, editIdx) : []
+      setMessages(historyBeforeEdit)
+      setEditingId(null)
+      setInput(''); setFiles([])
+      await fireStream(userContent, historyBeforeEdit)
+      return
+    }
+
+    setInput(''); setFiles([])
+    await fireStream(userContent, messages)
+  }, [input, files, messages, loading, editingId, fireStream, handleFileCmd])
+
+  // ─── Re-generate last AI response ─────────────────────────────
+  const handleRegenerate = useCallback(async () => {
+    if (loading) return
+    // Find last AI message (from the end)
+    let lastAiIdx = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'aria' || messages[i].role === 'agent') { lastAiIdx = i; break }
+    }
+    if (lastAiIdx === -1) return
+    const historyWithoutLast = messages.slice(0, lastAiIdx)
+    // Find the user message that preceded it
+    const lastUserMsg = [...historyWithoutLast].reverse().find(m => m.role === 'user')
+    if (!lastUserMsg) return
+    const historyBeforeUser = historyWithoutLast.slice(0, historyWithoutLast.findIndex(m => m.id === lastUserMsg.id))
+    setMessages(historyWithoutLast)
+    await fireStream(lastUserMsg.content, historyBeforeUser, false)
+  }, [messages, loading, fireStream])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: '#080808', position: 'relative' }}>
@@ -555,6 +597,20 @@ export default function ChatSessionPage() {
           <IC.Menu />
         </button>
         <span style={{ color: '#333', fontSize: '12px', letterSpacing: '0.12em', fontWeight: 700 }}>ARIA C11</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', background: '#111', border: '1px solid #1e1e1e', borderRadius: '4px', overflow: 'hidden' }}>
+          <button
+            onClick={() => setChatMode('professional')}
+            style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '5px 10px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', background: chatMode === 'professional' ? 'rgba(255,82,0,0.12)' : 'none', color: chatMode === 'professional' ? '#FF5200' : '#444', border: 'none', borderRight: '1px solid #1e1e1e', cursor: 'pointer' }}
+          >
+            <IC.Agent /> PRO
+          </button>
+          <button
+            onClick={() => setChatMode('fast')}
+            style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '5px 10px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', background: chatMode === 'fast' ? 'rgba(129,140,248,0.1)' : 'none', color: chatMode === 'fast' ? '#818cf8' : '#444', border: 'none', cursor: 'pointer' }}
+          >
+            <IC.Zap /> FAST
+          </button>
+        </div>
       </div>
 
       {/* File gen flash notification */}
@@ -578,7 +634,7 @@ export default function ChatSessionPage() {
           </div>
         )}
 
-        {messages.map(msg => (
+        {messages.map((msg, idx) => (
           <div key={msg.id} className={`msg ${msg.role === 'user' ? 'user' : msg.role === 'error' ? 'error' : 'assistant'}`}>
             <div className="msg-role" style={{ color: msg.role === 'agent' ? '#818cf8' : msg.role === 'aria' ? '#FF5200' : undefined }}>
               {msg.role === 'agent' ? `aria ↔ nexus · ${msg.iterations ?? 0} iter` : msg.role}
@@ -587,11 +643,39 @@ export default function ChatSessionPage() {
               {msg.role === 'agent'
                 ? (msg.agentIters ?? []).map(it => <AgentIterBlock key={it.iteration} iter={it} />)
                 : msg.role === 'aria'
-                  // FIX #4 #5: Render think blocks + markdown, bukan plain text
                   ? <AriaBubble content={msg.content} />
                   : msg.content
               }
             </div>
+            {/* User message — edit button */}
+            {msg.role === 'user' && !loading && (
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '4px' }}>
+                <button
+                  onClick={() => { setEditingId(msg.id); setInput(msg.content) }}
+                  style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', color: '#333', cursor: 'pointer', fontSize: '10px', padding: '2px 4px' }}
+                  title="Edit message"
+                >
+                  <IC.Edit /> edit
+                </button>
+              </div>
+            )}
+            {/* AI message — token count + re-generate on last message */}
+            {(msg.role === 'aria' || msg.role === 'agent') && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
+                <span style={{ color: '#2a2a2a', fontSize: '10px', fontFamily: 'JetBrains Mono, monospace' }}>
+                  ~{Math.ceil(msg.content.length / 4)} tokens
+                </span>
+                {idx === messages.length - 1 && !loading && (
+                  <button
+                    onClick={handleRegenerate}
+                    style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', color: '#333', cursor: 'pointer', fontSize: '10px', padding: '2px 4px' }}
+                    title="Re-generate"
+                  >
+                    <IC.Refresh /> regenerate
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         ))}
 
@@ -623,6 +707,12 @@ export default function ChatSessionPage() {
 
       {/* Input */}
       <div className="input-area">
+        {editingId && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', background: 'rgba(255,82,0,0.06)', borderBottom: '1px solid rgba(255,82,0,0.15)', fontSize: '11px', color: '#FF5200' }}>
+            <IC.Edit /> Editing message
+            <button onClick={() => { setEditingId(null); setInput('') }} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#555', cursor: 'pointer', padding: '0 4px', fontSize: '13px' }}>✕</button>
+          </div>
+        )}
         {files.length > 0 && (
           <div className="attachments-row">
             {files.map(f => (
