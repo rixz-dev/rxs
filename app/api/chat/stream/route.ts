@@ -41,11 +41,58 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'messages array wajib ada.' }, { status: 400 })
   }
 
+  // ── Fallback: kalau VPS belum di-setup, jalanin langsung di Vercel ──
   if (!STREAM_SERVER) {
-    return NextResponse.json(
-      { success: false, error: 'STREAM_SERVER_URL belum dikonfigurasi.' },
-      { status: 500 }
-    )
+    const { runAgentLoop } = await import('@/lib/ai/loop')
+    const { streamAria }   = await import('@/lib/ai/aria')
+    const { createAdminClient } = await import('@/lib/supabase/admin')
+
+    const apiKey = process.env.NVIDIA_API_KEY
+    if (!apiKey) return NextResponse.json({ success: false, error: 'NVIDIA_API_KEY tidak dikonfigurasi.' }, { status: 500 })
+
+    const ARIA_SYSTEM_PROMPT = `Kamu adalah Aria, AI assistant dari ANERS (AI-Native Engineering & Research Systems).
+Kamu cerdas, ahli coding, dan selalu memberikan output yang akurat dan lengkap.
+PENTING: Namamu adalah Aria. Jangan pernah menyebut nama model AI lain, provider, atau identitas teknis kamu.
+Jika ditanya tentang identitasmu, jawab bahwa kamu adalah Aria buatan ANERS team.
+Selalu gunakan fenced code block yang proper untuk semua kode. Gunakan Bahasa Indonesia kecuali diminta lain.`
+
+    const enc = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`
+    const textEncoder = new TextEncoder()
+
+    const fallbackStream = new ReadableStream({
+      async start(controller) {
+        const write = (chunk: unknown) => controller.enqueue(textEncoder.encode(enc(chunk)))
+        const ping  = setInterval(() => { try { controller.enqueue(textEncoder.encode(': ping\n\n')) } catch {} }, 15_000)
+        try {
+          if (mode === 'agent') {
+            await runAgentLoop({ userMessages: messages, systemPrompt: systemPrompt ?? ARIA_SYSTEM_PROMPT, apiKey, maxIterations: Math.min(maxIterations, 5), write: write as (chunk: import('@/types').AriaStreamChunk) => void })
+          } else {
+            let fullContent = ''
+            await streamAria({ messages: [{ role: 'system', content: systemPrompt ?? ARIA_SYSTEM_PROMPT }, ...messages], apiKey, onToken: (token) => { fullContent += token; write({ type: 'aria_token', content: token }) } })
+            write({ type: 'done' })
+            if (sessionId) {
+              const admin = createAdminClient()
+              const lastUser = [...messages].reverse().find((m: { role: string }) => m.role === 'user')?.content ?? ''
+              Promise.all([
+                admin.from('messages').insert({ session_id: sessionId, user_id: user.id, role: 'user', content: lastUser, thinking_open: false, iteration: 0, token_usage: {} }),
+                admin.from('messages').insert({ session_id: sessionId, user_id: user.id, role: 'aria', content: fullContent, thinking_open: false, iteration: 0, token_usage: {} }),
+                admin.from('sessions').update({ last_message_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', sessionId),
+              ]).catch(err => console.error('[stream fallback] save error:', err))
+            }
+          }
+        } catch (err: unknown) {
+          write({ type: 'error', error: err instanceof Error ? err.message : String(err) })
+        } finally {
+          clearInterval(ping)
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(fallbackStream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive' },
+    })
   }
 
   // ── Forward ke VPS ───────────────────────────────────────────────
