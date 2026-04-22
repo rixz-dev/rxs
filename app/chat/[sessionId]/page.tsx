@@ -457,7 +457,6 @@ export default function ChatSessionPage() {
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
-          let evt: { type: string; content?: string; iteration?: number }
           try { evt = JSON.parse(line.slice(6)) } catch { continue }
 
           if (!agentMode) {
